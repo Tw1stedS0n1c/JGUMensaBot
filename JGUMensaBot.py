@@ -2,108 +2,17 @@ import copy
 import re  # regex
 import requests
 import telegram.ext
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from bs4 import BeautifulSoup
 from emoji import emojize
+from telegram.ext import CallbackContext
+from datetime import datetime
+
+# import eigene Dateien
 import const as c
-import meine_token
-
-
-############################################## Klassen #################################################################
-class Speise:
-    """
-    :param beschreibung = Beschreibung des Gerichts (z.B. Nudeln mit Pesto)
-    :param preis = Preis für Studierende und nicht Studierende getrennt mit "/"
-    :param kennzeichnung = Ein Emoji der beschreibt welches Fleisch in diesem Gericht ist bzw "veggi" oder "vegan"
-    """
-
-    beschreibung = None
-    preis = None
-    kennzeichnung = None
-
-    def __init__(self, *, beschreibung=None, preis=None, kennzeichnung=None):
-        self.beschreibung = beschreibung
-        self.preis = preis
-        self.kennzeichnung = kennzeichnung.strip()
-
-    def getSpeisenNachricht(self):
-        ret = self.beschreibung.strip()
-        ret += "\n" + self.preis
-        ret = ret.strip()
-        ret += "\n" + self.kennzeichnung
-        ret = ret.strip()
-        return ret
-
-
-class Theke:
-    """
-    :param theke = Nummer der Theke (bspw. "1", "3") oder "Außerdem gibt es noch"
-    :param speisenliste = An einer Theke gibt es viele Speisen. Jedes Element ist von der Klasse "Speise"
-    :param keine_ausgabe = Ist "True" wenn es dort heute keine Ausgabe gibt
-    """
-
-    theke = None
-    speisenliste = []
-    keine_ausgabe = False
-    keine_ausgabe_mit_filter = False
-
-    def __init__(self, *, theke=None, speisenliste=[], keine_ausgabe=False):
-        if speisenliste is None:
-            speisenliste = []
-        self.theke = theke
-        self.speisenliste = speisenliste
-        self.keine_ausgabe = keine_ausgabe
-
-    def entferneFleisch(self):
-        """
-        Entfernt alle Produkte die NICHT vegetarisch sind, da diese Fleisch enthalten.
-        """
-        result = []
-        for i in range(len(self.speisenliste)):
-            if ("veggi" in self.speisenliste[i].kennzeichnung) or ("vegan" in self.speisenliste[i].kennzeichnung):
-                result.append(self.speisenliste[i])
-        self.speisenliste = result
-
-        if len(self.speisenliste) == 0:  # wenn alle Gerichte entfernt wurden
-            self.keine_ausgabe_mit_filter = True
-
-    def entferneTierprodukte(self):
-        """
-        Entfernt alle Produkte die NICHT vegan sind, da diese Tierprodulkte enthalfen.
-        """
-        result = []
-        for i in range(len(self.speisenliste)):
-            if "vegan" in self.speisenliste[i].kennzeichnung:
-                result.append(self.speisenliste[i])
-        self.speisenliste = result
-
-        if len(self.speisenliste) == 0:  # wenn alle Gerichte entfernt wurden
-            self.keine_ausgabe_mit_filter = True
-
-    def getNachrichtZumSenden(self):
-        """
-        Gibt einen String zurück der vom Bot direkt gesendet werden kann, ohne ihn weiter modifizieren zu müssen.
-        :return: String
-        """
-
-        # Es gibt keine Gericht
-        if self.keine_ausgabe == True:
-            return "An Theke " + self.theke + " gibt es heute keine Ausgabe."
-        elif self.keine_ausgabe_mit_filter == True:
-            return "An Theke " + self.theke + " gibt es heute keine Gerichte mit deinem gewählten Filter."
-
-        # Beschreibung, welche Theke gemeint ist
-        if len(self.theke) == 1:  # es handelt sich um Theke 1, 2, 3 oder 4
-            ret = "An Theke " + self.theke + " gibt es heute:\n"
-        else:
-            ret = "Außerdem gibt es noch:\n"
-
-        # Alle Gerichte zusammenschreiben"
-        for i in range(0, len(self.speisenliste)):
-            ret += self.speisenliste[i].getSpeisenNachricht()
-            if i < len(self.speisenliste) - 1:
-                ret += "\n---\n"
-        return ret
+import config
+from speise import Speise
+from theke import Theke
 
 
 ############################################## CODE ###################################################################
@@ -111,12 +20,15 @@ def get_fleisch_information(div_foodIcon_contents, bezeichnung_in_klammern=False
     alleFleischEmojis = ""
     if bezeichnung_in_klammern == True:
         string_mit_fleisch = div_foodIcon_contents
+        # alles mit if weil es mehrere ICONS geben kann
         if re.findall(",S,|,S[)]|[(]S,|[(]S[)]", string_mit_fleisch):
             alleFleischEmojis += c.EMOJI_SCHWEIN + " "
         if re.findall(",R,|,R[)]|[(]R,|[(]R[)]", string_mit_fleisch):
             alleFleischEmojis += c.EMOJI_RIND + " "
         if re.findall(",G,|,G[)]|[(]G,|[(]G[)]", string_mit_fleisch):
             alleFleischEmojis += c.EMOJI_HUHN + " "
+        if re.findall(",Fi,|,Fi[)]|[(]Fi,|[(]Fi[)]", string_mit_fleisch):
+            alleFleischEmojis += c.EMOJI_FISCH + " "
 
     else:
         # Fleischbezeichnung ist in DIV
@@ -241,212 +153,21 @@ def makeurl(mensa="url", tag=None):
 
 
 # -------------------------------------------------- COMMANDS --------------------------------------------------
-def command_start(bot, update):
-    start_message = "Das ist ein Mensabot der JGU Mainz. Das Projekt ist nicht offiziell und ich bin nur ein Student. " \
-                    "Um anzufangen rate ich dir einmal den /zentralmensa Befehl zu probieren. Viel Spaß!"
-    bot.send_message(chat_id=update.message.chat_id, text=start_message)
-
-
-def command_zentralmensa(bot, update):
-    button_list = [
-        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_zentralmensa")],
-        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_zentralmensa")],
-        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_zentralmensa")],
-
-    ]
-    markup = InlineKeyboardMarkup(button_list)
-    bot.send_message(chat_id=update.message.chat_id, text="Wähle deine Gerichte:", reply_markup=markup)
-
-
-def parse_mensa(bot, update, url, gerichteauswahl):
-    # <editor-fold desc="init">
-    # init
-    theke1 = Theke(theke="1", speisenliste=[], keine_ausgabe=False)
-    theke2 = Theke(theke="2", speisenliste=[], keine_ausgabe=False)
-    theke3 = Theke(theke="Snack", speisenliste=[], keine_ausgabe=False)
-    alle_theken = [theke1, theke2, theke3]
-    speisen = []
-
-    page = requests.get(url)
-    if page.status_code != 200:
-        text = "Die Homepage\n" + c.URL_SPEISEPLAN + "\n ist nicht erreichbar " + c.EMOJI_SOB
-        bot.edit_message_text(text=text,
-                              chat_id=update.callback_query.message.chat_id,
-                              message_id=update.callback_query.message.message_id)
-        return
-    soup = BeautifulSoup(page.text, 'html.parser')
-    counterboxes = soup.find_all('div', attrs={'class': 'counter_box'})
-    # </editor-fold>
-
-    # <editor-fold desc="Parse das gesamte Essen">
-    # Wenn es kein Essen gibt
-    if len(counterboxes) == 0:
-        for theke in alle_theken:
-            theke.keine_ausgabe = True
-    # parse alle Speisen von allen (meistens 2) Theken
-    for i in range(len(counterboxes)):
-        speisen = counterboxes[i].find_all('div', attrs={'class': 'menuspeise'})
-
-        # pro Theke jede Speise
-        for speise in speisen:
-            erhaltene_speise = get_speise_von_div_theke(speise)
-            if erhaltene_speise is not None:
-                alle_theken[i].speisenliste.append(erhaltene_speise)
-            elif erhaltene_speise is None:
-                alle_theken[i].keine_ausgabe = True
-
-    # parse alle Speisen aus "Snack"-Bereich
-    try:  # wird gebraucht, falls Mensa zu hat, dann skip einfach
-        snackplan = soup.find_all('div', attrs={'class': 'specialbox'})
-        speisen = snackplan[0].find_all('div', attrs={'class': 'special_menu'})
-    except:
-        pass
-
-    for speise in speisen:
-        erhaltene_speise = get_speise_von_div_snack(speise)
-        if erhaltene_speise is not None:
-            alle_theken[2].speisenliste.append(erhaltene_speise)
-        elif erhaltene_speise is None:
-            alle_theken[2].keine_ausgabe = True
-    # </editor-fold>
-
-    # <editor-fold desc="Filtere ungewünschte Speisen">
-    # Filter alle ungewünschten Speisen
-    if gerichteauswahl != "alles":
-        for i in range(len(alle_theken)):
-            if gerichteauswahl == "veggi":
-                alle_theken[i].entferneFleisch()
-            elif gerichteauswahl == "vegan":
-                alle_theken[i].entferneTierprodukte()
-            # hier noch erweiterbar, z.b. mit "custom"
-    # </editor-fold>
-
-    # <editor-fold desc="Sende Nachrichten">
-    # Sende Nachrichten und bearbeite die Nachricht mit den InlineKeyboards "alles", "vegetarisch", "vegan"
-    edit_text = "Ihre Auswahl war: "
-    if gerichteauswahl == "alles":
-        edit_text += "Alle Gerichte"
-    elif gerichteauswahl == "veggi":
-        edit_text += c.VEGGI
-    elif gerichteauswahl == "vegan":
-        edit_text += c.VEGAN
-    else:
-        edit_text += c.ERROR
-    bot.edit_message_text(text=edit_text,
-                          chat_id=update.callback_query.message.chat_id,
-                          message_id=update.callback_query.message.message_id)
-    for theke in alle_theken:
-        bot.send_message(chat_id=update.effective_message.chat_id, text=theke.getNachrichtZumSenden())
-    # </editor-fold>
-
-
-def command_mensaria(bot, update):
-    button_list = [
-        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_mensaria")],
-        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_mensaria")],
-        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_mensaria")],
-
-    ]
-    markup = InlineKeyboardMarkup(button_list)
-    bot.send_message(chat_id=update.message.chat_id, text="Wähle deine Gerichte:", reply_markup=markup)
-
-
-def command_gfg(bot, update):
-    button_list = [
-        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_gfg")],
-        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_gfg")],
-        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_gfg")],
-
-    ]
-    markup = InlineKeyboardMarkup(button_list)
-    bot.send_message(chat_id=update.message.chat_id, text="Wähle deine Gerichte:", reply_markup=markup)
-
-
-def command_rewi(bot, update):
-    button_list = [
-        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_rewi")],
-        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_rewi")],
-        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_rewi")],
-
-    ]
-    markup = InlineKeyboardMarkup(button_list)
-    bot.send_message(chat_id=update.message.chat_id, text="Wähle deine Gerichte:", reply_markup=markup)
-
-
-def command_oeffnungszeiten(bot, update):
-    button_list = [
-        [InlineKeyboardButton("Alle (dauert einen Moment)", callback_data="oz_alle")],
-        [InlineKeyboardButton("GFG", callback_data="oz_gfg")],
-        [InlineKeyboardButton("Ins Grüne", callback_data="oz_insgruene")],
-        [InlineKeyboardButton("Mensaria", callback_data="oz_mensaria")],
-        [InlineKeyboardButton("Rewi", callback_data="oz_rewi")],
-        [InlineKeyboardButton("Zentralmensa", callback_data="oz_zentralmensa")]
-    ]
-    markup = InlineKeyboardMarkup(button_list)
-    bot.send_message(chat_id=update.message.chat_id, text="Wähle deine Mensa:", reply_markup=markup)
-
-
-def command_help(bot, update):
-    ret = "Das ist der JGUMensaBot. Ich rate dir folgende Funktionen zu verwenden: \n \n"
-    ret += "/help - zeigt dir diese Nachricht\n"
-    ret += "/zentralmensa - damit bekommst du das Essen der Zentralmensa\n"
-    ret += "/mensaria - damit bekommst du das Essen der mensaria\n"
-    ret += "/gfg - damit bekommst du das Essen der GFG-Mensa\n"
-    ret += "/rewi - damit bekommst du das Essen der Rewi Cafeteria\n"
-    ret += "/oeffnungszeiten - wähle danach eine Mensa aus und die Öffnungszeiten werden angezeigt\n"
-    ret += "/feedback - damit kannst du mir Feedback geben\n"
-    ret += "/featurerequest - damit könnt ihr einen Verbesserungsvorschlag einreichen oder euch eine neue" \
-           "Funktionalität wünschen\n"
-    ret += "/curly_fries - dieser Command war der wunsch eines Kommilitonen von euch. Hiermit erfährt ihr ob es in" \
-           "der Zentralmensa heute Curly Fries gibt oder nicht " + c.EMOJI_WINK + "\n"
-    ret += "\n\nIch bin selbst nur ein Student und habe dieses Projekt ins leben gerufen um einfacher den Speiseplan " \
-           "zu erhalten. Die Informationen stammen immer direkt von der Homepage des Studierendenwerks.\n"
-    ret += "\nPS: Ich speichere keine Daten, lediglich deine TelegramID wenn du mir ein Feedback hinterlässt, damit " \
-           "ich dir antworten kann. Bald werde ich den Code auf Github veröffentlichen, dann kannst du dir den Code " \
-           "ansehen, kopieren oder deinen eigenen Bot hosten!\n"
-    ret += "Ich wünsche dir noch viel spaß mit dem Bot, und guten Appetit! " + c.EMOJI_PARTYING_FACE + "\n"
-    bot.send_message(chat_id=update.message.chat_id, text=ret)
-
-
-def command_feedback(bot, update, args):
-    feedback(bot, update, args, "Feedback")
-
-
-def command_featurerequest(bot, update, args):
-    feedback(bot, update, args, "Featurerequest")
-
-
-def feedback(bot, update, args, befehl):  # befehl ist entweder "feedback" oder "featurerequest"
-    if update.message.text.lower() == ("/" + befehl.lower()) or update.message.text.lower() == (
+def feedback(update: Update, context: CallbackContext, befehl):  # befehl ist entweder "feedback" oder "featurerequest"
+    if update.effective_message.text.lower() == ("/" + befehl.lower()) or update.effective_message.text.lower() == (
             "/" + befehl.lower() + "@jgumensabot"):
         msg = "Um ein " + befehl + " abzugeben, solltest du diese Syntax verwenden:\n"
-        msg += "\"/" + befehl + " blablabla\""
-        bot.send_message(chat_id=update.message.chat_id, text=msg)
+        msg += "\"/" + befehl.lower() + " blablabla\""
+        context.bot.send_message(chat_id=update.effective_message.chat_id, text=msg)
     else:
-        bot.send_message(chat_id=update.message.chat_id, text="Danke für dein " + befehl + "!")
-        feedback = befehl + " von: " + update.message.from_user.full_name + "\n"
-        feedback += "Telegram ID: " + str(update.message.from_user.id) + "\n"
-        feedback += "\n" + update.message.text  # /feedback has 9 chars
-        bot.send_message(chat_id=, text=feedback)  # TODO: replace ID with YOUR ID
+        context.bot.send_message(chat_id=update.effective_message.chat_id, text="Danke für dein " + befehl + "!")
+        feedback = befehl + " von: " + update.effective_message.from_user.full_name + "\n"
+        feedback += "Telegram ID: " + str(update.effective_message.from_user.id) + "\n"
+        feedback += "\n" + update.effective_message.text  # /feedback has 9 chars
 
-
-def command_answer(bot, update, args):
-    if update.message.chat_id == :  # die Nachricht ist von mir  # TODO: replace ID with YOUR ID
-        if update.message.text == "/answer" or update.message.text == "/answer@JGUMensaBot" or update.message.text == "/answer@Daboss_bot":
-            bot.send_message(chat_id=update.message.chat_id, text="Syntax: \n/answer TelegramID blablabla")
-        else:
-            recipient_id = update.message.text.split(" ")[1]
-            message_to_recipient = ' '.join(update.message.text.split(" ")[2:])
-            message_to_me = "Die Nachricht wurde an " + recipient_id + " gesendet \n \n" + message_to_recipient
-
-            bot.send_message(chat_id=update.message.chat_id, text=message_to_me)
-            try:
-                bot.send_message(chat_id=recipient_id, text=message_to_recipient)
-            except:  # Wenn die Nachricht nicht gesendet werden konnte, antworte mir, dass es nicht ging
-                msg = "Die Nachricht konnte nicht gesendet werden " + emojize(":sob:", use_aliases=True)
-                bot.send_message(chat_id=update.message.chat_id, text=msg)
-    else:
-        bot.send_message(chat_id=update.message.chat_id, text="Du bist nicht authorisiert")
+        # sende Nachrichten an admins
+        for id in config.SUPERADMIN:
+            context.bot.send_message(chat_id=id, text=feedback)
 
 
 def parse_gerichte_zentralmensa(bot, update, url, gerichteauswahl):
@@ -497,7 +218,7 @@ def parse_gerichte_zentralmensa(bot, update, url, gerichteauswahl):
                     suppen_objekt = soup.find_all('div', attrs={'class': 'special_box'})[0]. \
                         contents[1].contents[1].contents
                     genaue_suppe = filter_allergikerinformationen(suppen_objekt[0]).strip()  # z.b. Tomatensuppe
-                    kennzeichnung = get_veggi__information(suppen_objekt)
+                    kennzeichnung = get_veggi_vegan_information(suppen_objekt)
                     beschreibung = tagessuppe + " (" + genaue_suppe + ")"  # "Tagessuppe (Tomatensuppe)"
 
                     # erzeuge Speisenobjekt
@@ -592,8 +313,16 @@ def parse_gerichte_zentralmensa(bot, update, url, gerichteauswahl):
         bot.send_message(chat_id=update.effective_message.chat_id, text=theke.getNachrichtZumSenden())
 
 
-def command_curly_fries(bot, update):
-    page = requests.get(makeurl(c.URL_ZENTRALMENSA, c.HEUTE))
+def parse_mensa(bot, update, url, gerichteauswahl):
+    # <editor-fold desc="init">
+    # init
+    theke1 = Theke(theke="1", speisenliste=[], keine_ausgabe=False)
+    theke2 = Theke(theke="2", speisenliste=[], keine_ausgabe=False)
+    theke3 = Theke(theke="Snack", speisenliste=[], keine_ausgabe=False)
+    alle_theken = [theke1, theke2, theke3]
+    speisen = []
+
+    page = requests.get(url)
     if page.status_code != 200:
         text = "Die Homepage\n" + c.URL_SPEISEPLAN + "\n ist nicht erreichbar " + c.EMOJI_SOB
         bot.edit_message_text(text=text,
@@ -601,18 +330,222 @@ def command_curly_fries(bot, update):
                               message_id=update.callback_query.message.message_id)
         return
     soup = BeautifulSoup(page.text, 'html.parser')
+    counterboxes = soup.find_all('div', attrs={'class': 'counter_box'})
+    # </editor-fold>
+
+    # <editor-fold desc="Parse das gesamte Essen">
+    # Wenn es kein Essen gibt
+    if len(counterboxes) == 0:
+        for theke in alle_theken:
+            theke.keine_ausgabe = True
+    # parse alle Speisen von allen (meistens 2) Theken
+    for i in range(len(counterboxes)):
+        speisen = counterboxes[i].find_all('div', attrs={'class': 'menuspeise'})
+
+        # pro Theke jede Speise
+        for speise in speisen:
+            erhaltene_speise = get_speise_von_div_theke(speise)
+            if erhaltene_speise is not None:
+                alle_theken[i].speisenliste.append(erhaltene_speise)
+            elif erhaltene_speise is None:
+                alle_theken[i].keine_ausgabe = True
+
+    # parse alle Speisen aus "Snack"-Bereich
+    try:  # wird gebraucht, falls Mensa zu hat, dann skip einfach
+        snackplan = soup.find_all('div', attrs={'class': 'specialbox'})
+        speisen = snackplan[0].find_all('div', attrs={'class': 'special_menu'})
+    except:
+        pass
+
+    for speise in speisen:
+        erhaltene_speise = get_speise_von_div_snack(speise)
+        if erhaltene_speise is not None:
+            alle_theken[2].speisenliste.append(erhaltene_speise)
+        elif erhaltene_speise is None:
+            alle_theken[2].keine_ausgabe = True
+    # </editor-fold>
+
+    # <editor-fold desc="Filtere ungewünschte Speisen">
+    # Filter alle ungewünschten Speisen
+    if gerichteauswahl != "alles":
+        for i in range(len(alle_theken)):
+            if gerichteauswahl == "veggi":
+                alle_theken[i].entferneFleisch()
+            elif gerichteauswahl == "vegan":
+                alle_theken[i].entferneTierprodukte()
+            # hier noch erweiterbar, z.b. mit "custom"
+    # </editor-fold>
+
+    # <editor-fold desc="Sende Nachrichten">
+    # Sende Nachrichten und bearbeite die Nachricht mit den InlineKeyboards "alles", "vegetarisch", "vegan"
+    edit_text = "Ihre Auswahl war: "
+    if gerichteauswahl == "alles":
+        edit_text += "Alle Gerichte"
+    elif gerichteauswahl == "veggi":
+        edit_text += c.VEGGI
+    elif gerichteauswahl == "vegan":
+        edit_text += c.VEGAN
+    else:
+        edit_text += c.ERROR
+    bot.edit_message_text(text=edit_text,
+                          chat_id=update.callback_query.message.chat_id,
+                          message_id=update.callback_query.message.message_id)
+    for theke in alle_theken:
+        bot.send_message(chat_id=update.effective_message.chat_id, text=theke.getNachrichtZumSenden())
+    # </editor-fold>
+
+
+def command_start(update: Update, context: CallbackContext):
+    start_message = "Das ist ein Mensabot der JGU Mainz. Das Projekt ist nicht offiziell und ich bin nur ein Student. " \
+                    "Um anzufangen rate ich dir einmal den /zentralmensa Befehl zu probieren. Viel Spaß!"
+    context.bot.send_message(chat_id=update.effective_message.chat_id, text=start_message)
+
+
+def command_zentralmensa(update: Update, context: CallbackContext):
+    button_list = [
+        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_zentralmensa")],
+        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_zentralmensa")],
+        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_zentralmensa")],
+
+    ]
+    markup = InlineKeyboardMarkup(button_list)
+    context.bot.send_message(chat_id=update.effective_message.chat_id, text="Zentralmensa:\nWähle deine Gerichte:",
+                             reply_markup=markup)
+
+
+def command_mensaria(update: Update, context: CallbackContext):
+    button_list = [
+        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_mensaria")],
+        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_mensaria")],
+        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_mensaria")],
+
+    ]
+    markup = InlineKeyboardMarkup(button_list)
+    context.bot.send_message(chat_id=update.effective_message.chat_id, text="Mensaria:\nWähle deine Gerichte:",
+                             reply_markup=markup)
+
+
+def command_gfg(update: Update, context: CallbackContext):
+    button_list = [
+        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_gfg")],
+        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_gfg")],
+        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_gfg")],
+
+    ]
+    markup = InlineKeyboardMarkup(button_list)
+    context.bot.send_message(chat_id=update.effective_message.chat_id, text="GFG:\nWähle deine Gerichte:",
+                             reply_markup=markup)
+
+
+def command_rewi(update: Update, context: CallbackContext):
+    button_list = [
+        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_rewi")],
+        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_rewi")],
+        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_rewi")],
+
+    ]
+    markup = InlineKeyboardMarkup(button_list)
+    context.bot.send_message(chat_id=update.effective_message.chat_id, text="Rewi:\nWähle deine Gerichte:",
+                             reply_markup=markup)
+
+
+def command_oeffnungszeiten(update: Update, context: CallbackContext):
+    button_list = [
+        [InlineKeyboardButton("Alle (dauert einen Moment)", callback_data="oz_alle")],
+        [InlineKeyboardButton("GFG", callback_data="oz_gfg")],
+        [InlineKeyboardButton("Ins Grüne", callback_data="oz_insgruene")],
+        [InlineKeyboardButton("Mensaria", callback_data="oz_mensaria")],
+        [InlineKeyboardButton("Rewi", callback_data="oz_rewi")],
+        [InlineKeyboardButton("Zentralmensa", callback_data="oz_zentralmensa")]
+    ]
+    markup = InlineKeyboardMarkup(button_list)
+    context.bot.send_message(chat_id=update.effective_message.chat_id, text="Wähle deine Mensa:", reply_markup=markup)
+
+
+def command_help(update: Update, context: CallbackContext):
+    ret = "Das ist der JGUMensaBot. Ich rate dir folgende Funktionen zu verwenden: \n \n"
+    ret += "/help - zeigt dir diese Nachricht\n"
+    ret += "/zentralmensa - damit bekommst du das Essen der Zentralmensa\n"
+    ret += "/mensaria - damit bekommst du das Essen der mensaria\n"
+    ret += "/gfg - damit bekommst du das Essen der GFG-Mensa\n"
+    ret += "/rewi - damit bekommst du das Essen der Rewi Cafeteria\n"
+    ret += "/oeffnungszeiten - wähle danach eine Mensa aus und die Öffnungszeiten werden angezeigt\n"
+    ret += "/feedback - damit kannst du mir Feedback geben\n"
+    ret += "/featurerequest - damit könnt ihr einen Verbesserungsvorschlag einreichen oder euch eine neue" \
+           "Funktionalität wünschen\n"
+    ret += "/curly_fries - dieser Command war der wunsch eines Kommilitonen von euch. Hiermit erfährt ihr ob es in" \
+           "der Zentralmensa heute Curly Fries gibt oder nicht " + c.EMOJI_WINK + "\n"
+    ret += "\n\nIch bin selbst nur ein Student und habe dieses Projekt ins leben gerufen um einfacher den Speiseplan " \
+           "zu erhalten. Die Informationen stammen immer direkt von der Homepage des Studierendenwerks.\n"
+    ret += "\nPS: Ich speichere keine Daten, lediglich deine TelegramID wenn du mir ein Feedback hinterlässt, damit " \
+           "ich dir antworten kann. Bald werde ich den Code auf Github veröffentlichen, dann kannst du dir den Code " \
+           "ansehen, kopieren oder deinen eigenen Bot hosten!\n"
+    ret += "Ich wünsche dir noch viel spaß mit dem Bot, und guten Appetit! " + c.EMOJI_PARTYING_FACE + "\n"
+    context.bot.send_message(chat_id=update.effective_message.chat_id, text=ret)
+
+
+def command_feedback(update: Update, context: CallbackContext):
+    feedback(update, context, "Feedback")
+
+
+def command_featurerequest(update: Update, context: CallbackContext):
+    feedback(update, context, "Featurerequest")
+
+
+def command_answer(update: Update, context: CallbackContext):
+    if update.effective_message.chat_id in config.admin_ids:  # die Nachricht ist von mir
+        if update.effective_message.text == "/answer" or update.effective_message.text == "/answer@JGUMensaBot" or update.effective_message.text == "/answer@Daboss_bot":
+            context.bot.send_message(chat_id=update.effective_message.chat_id,
+                                     text="Syntax: \n/answer TelegramID blablabla")
+        else:
+            recipient_id = update.effective_message.text.split(" ")[1]
+            message_to_recipient = ' '.join(update.effective_message.text.split(" ")[2:])
+            message_to_me = "Die Nachricht wurde an " + recipient_id + " gesendet \n \n" + message_to_recipient
+
+            context.bot.send_message(chat_id=update.effective_message.chat_id, text=message_to_me)
+            try:
+                context.bot.send_message(chat_id=recipient_id, text=message_to_recipient)
+            except:  # Wenn die Nachricht nicht gesendet werden konnte, antworte mir, dass es nicht ging
+                msg = "Die Nachricht konnte nicht gesendet werden " + emojize(":sob:", use_aliases=True)
+                context.bot.send_message(chat_id=update.effective_message.chat_id, text=msg)
+    else:
+        context.bot.send_message(chat_id=update.effective_message.chat_id, text="Du bist nicht authorisiert")
+
+
+def command_curly_fries(update: Update, context: CallbackContext):
+    page = requests.get(makeurl(c.URL_ZENTRALMENSA, c.HEUTE))
+    if page.status_code != 200:
+        text = "Die Homepage\n" + c.URL_SPEISEPLAN + "\n ist nicht erreichbar " + c.EMOJI_SOB
+        context.bot.edit_message_text(text=text,
+                                      chat_id=update.callback_query.message.chat_id,
+                                      message_id=update.callback_query.message.message_id)
+        return
+    soup = BeautifulSoup(page.text, 'html.parser')
     curly_fries = True if "Curly fries" in soup.get_text() else False
 
     if curly_fries:
         text = "YEAH HEUTE GIBT ES CURLY FRIES " + c.EMOJI_PARTYING_FACE + c.EMOJI_PARTYING_POOPER
         text += "\n in der Zentralmensa"
-        bot.send_message(chat_id=update.message.chat_id, text=text)
-        bot.send_sticker(chat_id=update.message.chat_id, sticker='CAADAgADTAMAAkcVaAkmOU8hWPR0YhYE')
+        context.bot.send_message(chat_id=update.effective_message.chat_id, text=text)
+        context.bot.send_sticker(chat_id=update.effective_message.chat_id, sticker='CAADAgADTAMAAkcVaAkmOU8hWPR0YhYE')
     else:
         text = "DAMN heute gibt es keine curly fries... " + c.EMOJI_SOB + c.EMOJI_SOB
         text += "\n in der Zentralmensa"
-        bot.send_message(chat_id=update.message.chat_id, text=text)
-        bot.send_sticker(chat_id=update.message.chat_id, sticker='CAADAgADhwMAAkcVaAkSOJvCwDti1RYE')
+        context.bot.send_message(chat_id=update.effective_message.chat_id, text=text)
+        context.bot.send_sticker(chat_id=update.effective_message.chat_id, sticker='CAADAgADhwMAAkcVaAkSOJvCwDti1RYE')
+
+
+def command_naechste_woche(update: Update, context: CallbackContext):
+    # TODO: lalalala delete
+    button_list = [
+        [InlineKeyboardButton("Alle Gerichte", callback_data="gerichteauswahl_alles_zentralmensa")],
+        [InlineKeyboardButton(c.VEGGI, callback_data="gerichteauswahl_veggi_zentralmensa")],
+        [InlineKeyboardButton(c.VEGAN, callback_data="gerichteauswahl_vegan_zentralmensa")],
+
+    ]
+    markup = InlineKeyboardMarkup(button_list)
+    context.bot.send_message(chat_id=update.effective_message.chat_id, text="Wähle deine Gerichte:",
+                             reply_markup=markup)
 
 
 # -------------------------------------------------- QUERYS OEFFNUNGSZEITEN --------------------------------------------
@@ -760,20 +693,20 @@ def parse_oz_rewi(url):
 
 
 # -------------------------------------------------- QUERY HANDLER -----------------------------------------------------
-def query_handler_default(bot, update):
+def query_handler_default(update: Update, context: CallbackContext):
     data = update.callback_query.data
     if "oz_" in data:
-        query_oeffnungszeiten(bot, update)
+        query_oeffnungszeiten(update, context)
     elif "gerichteauswahl_" in data:
-        query_gerichteauswahl(bot, update)
+        query_gerichteauswahl(update, context)
 
     else:
-        bot.send_message(chat_id=update.callback_query.message.chat_id,
-                         text="Es ist ein etwas komisches passiert, bitte sag mir was du gemacht hast (mit /feedback),"
-                              "damit ich den Fehler beheben kann.")
+        context.bot.send_message(chat_id=update.callback_query.message.chat_id,
+                                 text="Es ist ein etwas komisches passiert, bitte sag mir was du gemacht hast (mit /feedback),"
+                                      "damit ich den Fehler beheben kann.")
 
 
-def query_oeffnungszeiten(bot, update):
+def query_oeffnungszeiten(update: Update, context: CallbackContext):
     # Es gibt für jede Mensa eine eigene Homepage, somit sind die URL jeweils notwendig. Da die Mensen NICHT dasselbe
     # Template verwenden und somit unterschiedlich strukturiert sind, habe ich dafür eigene Funktionen geschrieben.
     # Dazu kommt, dass jediglich Rewi und InsGrüne denselben Code verwenden. Deswegen habe ich mich für jeweils
@@ -809,54 +742,76 @@ def query_oeffnungszeiten(bot, update):
     else:
         ret = "Es ist ein Fehler aufgetreten, bitte versuchen Sie es nochmal."
 
-    bot.edit_message_text(text=ret,
-                          chat_id=update.callback_query.message.chat_id,
-                          message_id=update.callback_query.message.message_id)
+    context.bot.edit_message_text(text=ret,
+                                  chat_id=update.callback_query.message.chat_id,
+                                  message_id=update.callback_query.message.message_id)
 
 
-def query_gerichteauswahl(bot, update):
+def query_gerichteauswahl(update: Update, context: CallbackContext):
     data = update.callback_query.data
 
     # Zentralmensa
     if "gerichteauswahl_alles_zentralmensa" == data:
-        parse_gerichte_zentralmensa(bot, update, makeurl(c.URL_ZENTRALMENSA, c.HEUTE), "alles")
+        parse_gerichte_zentralmensa(context.bot, update, makeurl(c.URL_ZENTRALMENSA, c.HEUTE), "alles")
     elif "gerichteauswahl_veggi_zentralmensa" == data:
-        parse_gerichte_zentralmensa(bot, update, makeurl(c.URL_ZENTRALMENSA, c.HEUTE), "veggi")
+        parse_gerichte_zentralmensa(context.bot, update, makeurl(c.URL_ZENTRALMENSA, c.HEUTE), "veggi")
     elif "gerichteauswahl_vegan_zentralmensa" == data:
-        parse_gerichte_zentralmensa(bot, update, makeurl(c.URL_ZENTRALMENSA, c.HEUTE), "vegan")
+        parse_gerichte_zentralmensa(context.bot, update, makeurl(c.URL_ZENTRALMENSA, c.HEUTE), "vegan")
 
     # Mensaria
     elif "gerichteauswahl_alles_mensaria" == data:
-        parse_mensa(bot, update, makeurl(c.URL_MENSARIA, c.HEUTE), "alles")
+        parse_mensa(context.bot, update, makeurl(c.URL_MENSARIA, c.HEUTE), "alles")
     elif "gerichteauswahl_veggi_mensaria" == data:
-        parse_mensa(bot, update, makeurl(c.URL_MENSARIA, c.HEUTE), "veggi")
+        parse_mensa(context.bot, update, makeurl(c.URL_MENSARIA, c.HEUTE), "veggi")
     elif "gerichteauswahl_vegan_mensaria" == data:
-        parse_mensa(bot, update, makeurl(c.URL_MENSARIA, c.HEUTE), "vegan")
+        parse_mensa(context.bot, update, makeurl(c.URL_MENSARIA, c.HEUTE), "vegan")
 
     # GFG
     elif "gerichteauswahl_alles_gfg" == data:
-        parse_mensa(bot, update, makeurl(c.URL_GFG, c.HEUTE), "alles")
+        parse_mensa(context.bot, update, makeurl(c.URL_GFG, c.HEUTE), "alles")
     elif "gerichteauswahl_veggi_gfg" == data:
-        parse_mensa(bot, update, makeurl(c.URL_GFG, c.HEUTE), "veggi")
+        parse_mensa(context.bot, update, makeurl(c.URL_GFG, c.HEUTE), "veggi")
     elif "gerichteauswahl_vegan_gfg" == data:
-        parse_mensa(bot, update, makeurl(c.URL_GFG, c.HEUTE), "vegan")
+        parse_mensa(context.bot, update, makeurl(c.URL_GFG, c.HEUTE), "vegan")
 
     # Rewi
-    elif "gerichteauswahl_alles_gfg" == data:
-        parse_mensa(bot, update, makeurl(c.URL_REWI, c.HEUTE), "alles")
-    elif "gerichteauswahl_veggi_gfg" == data:
-        parse_mensa(bot, update, makeurl(c.URL_REWI, c.HEUTE), "veggi")
-    elif "gerichteauswahl_vegan_gfg" == data:
-        parse_mensa(bot, update, makeurl(c.URL_REWI, c.HEUTE), "vegan")
+    elif "gerichteauswahl_alles_rewi" == data:
+        parse_mensa(context.bot, update, makeurl(c.URL_REWI, c.HEUTE), "alles")
+    elif "gerichteauswahl_veggi_rewi" == data:
+        parse_mensa(context.bot, update, makeurl(c.URL_REWI, c.HEUTE), "veggi")
+    elif "gerichteauswahl_vegan_rewi" == data:
+        parse_mensa(context.bot, update, makeurl(c.URL_REWI, c.HEUTE), "vegan")
 
     else:
-        bot.send_message(chat_id=update.callback_query.message.chat_id,
-                         text="Es ist ein etwas komisches passiert, bitte sag mir was du gemacht hast (mit /feedback),"
-                              "damit ich den Fehler beheben kann.")
+        context.bot.send_message(chat_id=update.callback_query.message.chat_id,
+                                 text="Es ist ein etwas komisches passiert, bitte sag mir was du gemacht hast (mit /feedback),"
+                                      "damit ich den Fehler beheben kann.")
+
+
+def got_photo(update: Update, context: CallbackContext):
+    file_id = update.effective_message.photo[-1].file_id
+    url = context.bot.getFile(file_id).file_path
+    photo = requests.get(url, allow_redirects=True)
+    user = update.effective_message.from_user.full_name + " - " + str(update.effective_message.from_user.id)
+    caption = update.effective_message.caption if (update.effective_message.caption) else ""
+    text = str(datetime.now()) + "\n" +user + ": " + caption
+
+    # safe picture
+    open('pics/' + file_id, 'wb').write(photo.content)
+
+    # create caption
+    destination = 'pics/' + file_id + '_caption'
+    open(destination, 'a').write(text + '\n')
+
+    context.bot.send_message(chat_id=update.effective_message.chat_id,
+                     text="Ich kann hiermit leider nichts anfangen, sorry " + c.EMOJI_MAN_SHRUGGING)
+    context.bot.send_message(chat_id=config.SUPERADMIN, text="jemand hat ein Foto gesendet")
+    context.bot.send_photo(chat_id=config.SUPERADMIN, photo=file_id, caption=text)
+    # bot.send_message(chat_id=config.SUPERADMIN, text=text)
 
 
 ############################################## essenzielles polling und dispatcher #####################################
-myupdater = telegram.ext.Updater(token=meine_token.TOKEN)
+myupdater = telegram.ext.Updater(token=config.TOKEN)
 dispatcher = myupdater.dispatcher
 
 # handler erzeugen und hinzufügen für alle Commands. Diese sind im Bot mit bspw. "/help" aufzurufen
@@ -865,12 +820,17 @@ dispatcher.add_handler(telegram.ext.CommandHandler('help', command_help))
 dispatcher.add_handler(telegram.ext.CommandHandler('zentralmensa', command_zentralmensa))
 dispatcher.add_handler(telegram.ext.CommandHandler('mensaria', command_mensaria))
 dispatcher.add_handler(telegram.ext.CommandHandler('gfg', command_gfg))
-dispatcher.add_handler(telegram.ext.CommandHandler('rewi', command_gfg))
+dispatcher.add_handler(telegram.ext.CommandHandler('rewi', command_rewi))
 dispatcher.add_handler(telegram.ext.CommandHandler('feedback', command_feedback, pass_args=True))
 dispatcher.add_handler(telegram.ext.CommandHandler('oeffnungszeiten', command_oeffnungszeiten))
 dispatcher.add_handler(telegram.ext.CommandHandler('answer', command_answer, pass_args=True))
 dispatcher.add_handler(telegram.ext.CommandHandler('featurerequest', command_featurerequest, pass_args=True))
 dispatcher.add_handler(telegram.ext.CommandHandler('curly_fries', command_curly_fries))
+dispatcher.add_handler(telegram.ext.CommandHandler('naechste_woche', command_naechste_woche))
+
+# wichtig
+picture_handler = telegram.ext.MessageHandler(telegram.ext.Filters.photo, got_photo)
+dispatcher.add_handler(picture_handler)
 
 # CallbackQueryHandler for InlineKeyboardQueries
 dispatcher.add_handler(telegram.ext.CallbackQueryHandler(query_handler_default))
